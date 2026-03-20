@@ -26,6 +26,10 @@
     // TODO: Pass config values as environment variables
     env: {
       MY_API_KEY: "${config.my_api_key}",
+      // We'll receive participant URLs over A2A, but we need to include the
+      // slot URL somewhere in the program in order for Amber to allow us to
+      // connect. Here we're putting it in an unused environment variable.
+      AMBER_HINT_PROXY: "${slots.proxy}",
     },
 
     network: {
