@@ -1,6 +1,6 @@
 FROM ghcr.io/astral-sh/uv:python3.13-bookworm AS osworld-clone
 # Clone osworld repo.
-RUN git clone --depth=1 -b pro-wh/dev https://github.com/pro-wh/osworld-qemu.git /osworld
+RUN git clone --depth=1 -b agentbeats https://github.com/RDI-Foundation/osworld-qemu.git /osworld
 
 FROM scratch AS osworld-ctx
 # Re-root the clone so its contents are at /. This stage can be overridden for
