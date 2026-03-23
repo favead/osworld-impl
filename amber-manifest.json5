@@ -24,6 +24,7 @@
 
     // TODO: Pass config values as environment variables
     env: {
+      PYTHONUNBUFFERED: "1",
     },
 
     network: {
