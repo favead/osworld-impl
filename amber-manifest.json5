@@ -13,7 +13,7 @@
 
   // External services this agent uses
   slots: {
-    proxy: { kind: "a2a", optional: true },
+    proxy: { kind: "a2a" },
   },
 
   // Runtime configuration
@@ -25,6 +25,10 @@
     // TODO: Pass config values as environment variables
     env: {
       PYTHONUNBUFFERED: "1",
+      // We'll receive participant URLs over A2A, but we need to include the
+      // slot URL somewhere in the program in order for Amber to allow us to
+      // connect. Here we're putting it in an unused environment variable.
+      AMBER_HINT_PROXY: "${slots.proxy}",
     },
 
     network: {
