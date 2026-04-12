@@ -1,34 +1,53 @@
 {
-  manifest_version: "0.1.0",
+  manifest_version: "0.2.0",
 
   // TODO: Declare all config your agent needs from the deployer
   // Use secret: true for sensitive values like API keys
   config_schema: {
     type: "object",
     properties: {
+      openai_api_key: { type: "string", secret: true },
+      openai_base_url: { type: "string" },
+      executor_model: { type: "string" },
+      planner_model: { type: "string" },
+      max_tokens: { type: "integer" },
+      top_p: { type: "number" },
+      temperature: { type: "number" },
+      max_trajectory_length: { type: "integer" },
+      planner_review_interval: { type: "integer" },
+      trajectory_summary_window: { type: "integer" },
+      a11y_tree_max_tokens: { type: "integer" },
+      qwen_api_backend: { type: "string" },
+      qwen_enable_thinking: { type: "boolean" },
+      qwen_thinking_budget: { type: "integer" },
     },
     required: [],
     additionalProperties: false,
   },
 
-  // External services this agent uses
-  slots: {
-    proxy: { kind: "a2a" },
-  },
-
   // Runtime configuration
   program: {
     // TODO: Replace with your docker image
-    image: "ghcr.io/rdi-foundation/osworld-green:latest",
+    image: "ghcr.io/rdi-foundation/osworld-impl:latest",
     entrypoint: "uv run python src/server.py --host 0.0.0.0 --port 9009",
 
     // TODO: Pass config values as environment variables
     env: {
+      OPENAI_API_KEY: { when: "config.openai_api_key", value: "${config.openai_api_key}" },
+      OPENAI_BASE_URL: { when: "config.openai_base_url", value: "${config.openai_base_url}" },
+      EXECUTOR_MODEL: { when: "config.executor_model", value: "${config.executor_model}" },
+      PLANNER_MODEL: { when: "config.planner_model", value: "${config.planner_model}" },
+      MAX_TOKENS: { when: "config.max_tokens", value: "${config.max_tokens}" },
+      TOP_P: { when: "config.top_p", value: "${config.top_p}" },
+      TEMPERATURE: { when: "config.temperature", value: "${config.temperature}" },
+      MAX_TRAJECTORY_LENGTH: { when: "config.max_trajectory_length", value: "${config.max_trajectory_length}" },
+      PLANNER_REVIEW_INTERVAL: { when: "config.planner_review_interval", value: "${config.planner_review_interval}" },
+      TRAJECTORY_SUMMARY_WINDOW: { when: "config.trajectory_summary_window", value: "${config.trajectory_summary_window}" },
+      A11Y_TREE_MAX_TOKENS: { when: "config.a11y_tree_max_tokens", value: "${config.a11y_tree_max_tokens}" },
+      QWEN_API_BACKEND: { when: "config.qwen_api_backend", value: "${config.qwen_api_backend}" },
+      QWEN_ENABLE_THINKING: { when: "config.qwen_enable_thinking", value: "${config.qwen_enable_thinking}" },
+      QWEN_THINKING_BUDGET: { when: "config.qwen_thinking_budget", value: "${config.qwen_thinking_budget}" },
       PYTHONUNBUFFERED: "1",
-      // We'll receive participant URLs over A2A, but we need to include the
-      // slot URL somewhere in the program in order for Amber to allow us to
-      // connect. Here we're putting it in an unused environment variable.
-      AMBER_HINT_PROXY: "${slots.proxy}",
     },
 
     network: {
@@ -46,19 +65,4 @@
   // Capabilities exposed to the scenario
   exports: { a2a: "a2a" },
 
-  // TODO: Describe the assessment request your green agent receives
-  metadata: {
-    assessment_config: {
-      action_space: "pyautogui",
-      observation_type: "screenshot",
-      sleep_after_execution: 0.0,
-      max_steps: 15,
-      test_all_meta_name: "test_nogdrive",
-      domain: null,
-      num_shards: 1,
-      shard_index: 0,
-      num_workers: 3,
-    }, // replace with your default assessment parameters, e.g. {"num_rounds": 2}
-    participant_roles: ["agent"], // list the roles your green agent expects, e.g. ["pro_debater", "con_debater"]
-  },
 }

@@ -1,7 +1,7 @@
 [project]
-name = "green-agent-template"
+name = "osworld-impl-agent"
 version = "0.1.0"
-description = "A template for A2A green agents"
+description = "OSWorld A2A agent for desktop action prediction"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [

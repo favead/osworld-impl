@@ -26,31 +26,23 @@ def main():
     # See: https://a2a-protocol.org/latest/tutorials/python/3-agent-skills-and-card/
     
     skill = AgentSkill(
-        id="osworld_eval",
-        name="OSWorld Evaluation",
-        description="Runs OSWorld.",
-        tags=["osworld", "evaluation", "desktop"],
+        id="use_computer",
+        name="Use Computer",
+        description="Interprets OSWorld observations and returns desktop actions to complete the requested task.",
+        tags=["osworld", "desktop", "automation", "multimodal"],
         examples=[
-            """
-                {
-                    "participants": {
-                        "agent": "http://localhost:9010/"
-                    },
-                    "config": {
-                        "test_all_meta_name": "test_small"
-                    }
-                }
-            """,
-        ]
+            "Open the settings app and switch the system theme to dark mode.",
+            "Read the screenshot and suggest the next UI action to continue the task.",
+        ],
     )
 
     agent_card = AgentCard(
-        name="OSWorld Green Agent",
-        description="Runs an OSWorld evaluation.",
+        name="OSWorld Impl Agent",
+        description="An OSWorld A2A agent that plans and executes desktop actions from text, screenshots, and structured observations.",
         url=args.card_url or f"http://{args.host}:{args.port}/",
         version='1.0.0',
-        default_input_modes=['text'],
-        default_output_modes=['text'],
+        default_input_modes=['text', 'file', 'data'],
+        default_output_modes=['text', 'data'],
         capabilities=AgentCapabilities(streaming=True),
         skills=[skill]
     )
