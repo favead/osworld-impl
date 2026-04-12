@@ -1,5 +1,5 @@
 {
-  manifest_version: "0.2.0",
+  manifest_version: "0.1.0",
 
   // TODO: Declare all config your agent needs from the deployer
   // Use secret: true for sensitive values like API keys
@@ -28,7 +28,7 @@
   // Runtime configuration
   program: {
     // TODO: Replace with your docker image
-    image: "ghcr.io/favead/osworld-impl:1.3.0",
+    image: "ghcr.io/favead/osworld-impl:1.1.0",
     entrypoint: "uv run python src/server.py --host 0.0.0.0 --port 9009",
 
     // TODO: Pass config values as environment variables
