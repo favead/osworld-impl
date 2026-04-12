@@ -28,7 +28,7 @@
   // Runtime configuration
   program: {
     // TODO: Replace with your docker image
-    image: "ghcr.io/rdi-foundation/osworld-impl:latest",
+    image: "ghcr.io/rdi-foundation/osworld-impl:1.1.0",
     entrypoint: "uv run python src/server.py --host 0.0.0.0 --port 9009",
 
     // TODO: Pass config values as environment variables
