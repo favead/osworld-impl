@@ -25,6 +25,25 @@ from messenger import Messenger
 
 logger = logging.getLogger("osworld_impl.agent")
 
+PYAUTOGUI_FUNCS = {
+    "click",
+    "doubleClick",
+    "rightClick",
+    "middleClick",
+    "moveTo",
+    "move",
+    "dragTo",
+    "drag",
+    "scroll",
+    "hscroll",
+    "typewrite",
+    "write",
+    "press",
+    "keyDown",
+    "keyUp",
+    "hotkey",
+}
+
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
@@ -215,7 +234,7 @@ class Agent:
         actions = executor_result.get("actions", [])
         if not isinstance(actions, list):
             actions = []
-        actions = [str(action).strip() for action in actions if str(action).strip()]
+        actions = self._normalize_actions(actions)
         if not actions:
             actions = ["WAIT"]
 
@@ -486,7 +505,7 @@ class Agent:
                 "type": "text",
                 "text": (
                     "Return strict JSON with keys response and actions. "
-                    "actions must be an array of 1 to 3 pyautogui-style action strings. "
+                    "actions must be an array of 1 to 3 fully-qualified pyautogui action strings like pyautogui.click(100, 200). "
                     "Use WAIT if you need the UI to update, DONE if the task is complete, and FAIL if blocked."
                 ),
             },
@@ -635,6 +654,29 @@ class Agent:
             action if len(action) <= 200 else action[:200] + "..." for action in actions
         ]
         return "; ".join(cleaned)
+
+    def _normalize_actions(self, raw_actions: list[Any]) -> list[str]:
+        normalized: list[str] = []
+        for raw_action in raw_actions:
+            action = str(raw_action).strip()
+            if not action:
+                continue
+
+            marker = action.upper()
+            if marker in {"WAIT", "DONE", "FAIL"}:
+                normalized.append(marker)
+                continue
+
+            match = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*\(", action)
+            if match:
+                fn_name = match.group(1)
+                if fn_name in PYAUTOGUI_FUNCS:
+                    normalized.append(f"pyautogui.{action}")
+                    continue
+
+            normalized.append(action)
+
+        return normalized
 
     def _looks_stuck(self) -> bool:
         recent = self.state.trajectory[-3:]
