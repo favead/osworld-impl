@@ -1,5 +1,5 @@
 {
-  manifest_version: "0.2.0",
+  manifest_version: "0.1.0",
 
   // TODO: Declare all config your agent needs from the deployer
   // Use secret: true for sensitive values like API keys
@@ -24,6 +24,8 @@
     required: [],
     additionalProperties: false,
   },
+
+  slots: {},
 
   // Runtime configuration
   program: {
