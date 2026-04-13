@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -28,6 +29,7 @@ logger = logging.getLogger("osworld_impl.agent")
 PYAUTOGUI_FUNCS = {
     "click",
     "doubleClick",
+    "tripleClick",
     "rightClick",
     "middleClick",
     "moveTo",
@@ -58,6 +60,9 @@ MAX_TRAJECTORY_LENGTH = int(os.environ.get("MAX_TRAJECTORY_LENGTH", "12"))
 A11Y_TREE_MAX_TOKENS = int(os.environ.get("A11Y_TREE_MAX_TOKENS", "10000"))
 PLANNER_REVIEW_INTERVAL = int(os.environ.get("PLANNER_REVIEW_INTERVAL", "12"))
 TRAJECTORY_SUMMARY_WINDOW = int(os.environ.get("TRAJECTORY_SUMMARY_WINDOW", "8"))
+MODEL_TIMEOUT_SECONDS = float(os.environ.get("MODEL_TIMEOUT_SECONDS", "120"))
+MODEL_MAX_RETRIES = int(os.environ.get("MODEL_MAX_RETRIES", "1"))
+MODEL_RETRY_BACKOFF_SECONDS = float(os.environ.get("MODEL_RETRY_BACKOFF_SECONDS", "1.5"))
 
 
 @dataclass
@@ -232,6 +237,8 @@ class Agent:
         executor_result = self._execute_action(executor_instruction, current_obs)
         response = executor_result.get("response", "")
         actions = executor_result.get("actions", [])
+        if isinstance(actions, dict):
+            actions = [actions]
         if not isinstance(actions, list):
             actions = []
         actions = self._normalize_actions(actions)
@@ -505,8 +512,11 @@ class Agent:
                 "type": "text",
                 "text": (
                     "Return strict JSON with keys response and actions. "
-                    "actions must be an array of 1 to 3 fully-qualified pyautogui action strings like pyautogui.click(100, 200). "
-                    "Use WAIT if you need the UI to update, DONE if the task is complete, and FAIL if blocked."
+                    "actions must be an array of 1 to 3 items. "
+                    "Each item should be either a fully-qualified pyautogui string like pyautogui.click(100, 200), "
+                    "or an object like {\"action\":\"left_click\",\"coordinate\":[100,200]}. "
+                    "For OSWorld compatibility, use WAIT to pause, DONE to finish successfully, FAIL to finish unsuccessfully, "
+                    "or structured terminate actions like {\"action\":\"terminate\",\"status\":\"success\"}."
                 ),
             },
         ]
@@ -568,16 +578,39 @@ class Agent:
             },
             method="POST",
         )
-        try:
-            with urllib.request.urlopen(request, timeout=120) as response:
-                body = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            error_body = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(
-                f"LLM request failed with HTTP {exc.code}: {error_body}"
-            ) from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(f"LLM request failed: {exc}") from exc
+        last_error: Exception | None = None
+        attempts = max(MODEL_MAX_RETRIES, 0) + 1
+        for attempt in range(1, attempts + 1):
+            try:
+                with urllib.request.urlopen(request, timeout=MODEL_TIMEOUT_SECONDS) as response:
+                    body = json.loads(response.read().decode("utf-8"))
+                break
+            except urllib.error.HTTPError as exc:
+                error_body = exc.read().decode("utf-8", errors="replace")
+                is_retryable = exc.code in {408, 409, 425, 429, 500, 502, 503, 504}
+                last_error = RuntimeError(
+                    f"LLM request failed with HTTP {exc.code}: {error_body}"
+                )
+                if not is_retryable or attempt == attempts:
+                    raise last_error from exc
+            except urllib.error.URLError as exc:
+                last_error = RuntimeError(f"LLM request failed: {exc}")
+                if attempt == attempts:
+                    raise last_error from exc
+
+            sleep_seconds = MODEL_RETRY_BACKOFF_SECONDS * attempt
+            logger.warning(
+                "LLM call failed for model %s (attempt %s/%s), retrying in %.1fs",
+                model,
+                attempt,
+                attempts,
+                sleep_seconds,
+            )
+            time.sleep(sleep_seconds)
+        else:
+            if last_error:
+                raise last_error
+            raise RuntimeError("LLM request failed without a specific error")
 
         choices = body.get("choices", [])
         if not choices:
@@ -658,6 +691,12 @@ class Agent:
     def _normalize_actions(self, raw_actions: list[Any]) -> list[str]:
         normalized: list[str] = []
         for raw_action in raw_actions:
+            if isinstance(raw_action, dict):
+                mapped = self._action_from_object(raw_action)
+                if mapped:
+                    normalized.append(mapped)
+                continue
+
             action = str(raw_action).strip()
             if not action:
                 continue
@@ -677,6 +716,99 @@ class Agent:
             normalized.append(action)
 
         return normalized
+
+    def _action_from_object(self, action_obj: dict[str, Any]) -> str | None:
+        raw_action = action_obj.get(
+            "action",
+            action_obj.get("type", action_obj.get("action_type", "")),
+        )
+        action = str(raw_action).strip().lower()
+        if not action:
+            return None
+
+        if action in {"done", "success"}:
+            return "DONE"
+        if action in {"fail", "failed", "failure"}:
+            return "FAIL"
+
+        if action == "wait":
+            return "WAIT"
+        if action == "terminate":
+            status = str(action_obj.get("status", "failure")).strip().lower()
+            return "DONE" if status == "success" else "FAIL"
+
+        def _coord() -> tuple[int, int] | None:
+            value = action_obj.get("coordinate")
+            if not isinstance(value, list) or len(value) != 2:
+                return None
+            try:
+                return int(value[0]), int(value[1])
+            except (TypeError, ValueError):
+                return None
+
+        if action in {"left_click", "click"}:
+            coord = _coord()
+            if coord:
+                x, y = coord
+                return f"pyautogui.click({x}, {y})"
+            return "pyautogui.click()"
+
+        if action == "right_click":
+            coord = _coord()
+            if coord:
+                x, y = coord
+                return f"pyautogui.rightClick({x}, {y})"
+            return "pyautogui.rightClick()"
+
+        if action == "middle_click":
+            coord = _coord()
+            if coord:
+                x, y = coord
+                return f"pyautogui.middleClick({x}, {y})"
+            return "pyautogui.middleClick()"
+
+        if action in {"double_click", "triple_click", "mouse_move", "left_click_drag"}:
+            coord = _coord()
+            if not coord:
+                return None
+            x, y = coord
+            mapping = {
+                "double_click": "doubleClick",
+                "triple_click": "tripleClick",
+                "mouse_move": "moveTo",
+                "left_click_drag": "dragTo",
+            }
+            return f"pyautogui.{mapping[action]}({x}, {y})"
+
+        if action == "type":
+            text = action_obj.get("text")
+            if isinstance(text, str) and text:
+                return f"pyautogui.write({json.dumps(text)})"
+            return None
+
+        if action == "key":
+            keys = action_obj.get("keys")
+            if isinstance(keys, list) and keys:
+                cleaned = [str(key).strip() for key in keys if str(key).strip()]
+                if not cleaned:
+                    return None
+                if len(cleaned) == 1:
+                    return f"pyautogui.press({json.dumps(cleaned[0])})"
+                args = ", ".join(json.dumps(key) for key in cleaned)
+                return f"pyautogui.hotkey({args})"
+            return None
+
+        if action in {"scroll", "hscroll"}:
+            pixels = action_obj.get("pixels")
+            try:
+                amount = int(float(pixels))
+            except (TypeError, ValueError):
+                return None
+            if action == "hscroll":
+                return f"pyautogui.hscroll({amount})"
+            return f"pyautogui.scroll({amount})"
+
+        return None
 
     def _looks_stuck(self) -> bool:
         recent = self.state.trajectory[-3:]

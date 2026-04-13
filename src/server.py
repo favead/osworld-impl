@@ -2,6 +2,7 @@ import argparse
 import logging
 import uvicorn
 
+from dotenv import load_dotenv
 from a2a.server.apps import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
@@ -15,6 +16,7 @@ from executor import Executor
 
 
 def main():
+    load_dotenv(override=True)
     logging.basicConfig(level=logging.INFO)
     parser = argparse.ArgumentParser(description="Run the A2A agent.")
     parser.add_argument("--host", type=str, default="127.0.0.1", help="Host to bind the server")

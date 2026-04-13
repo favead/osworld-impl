@@ -54,6 +54,11 @@ The agent reads deployer config from `amber-manifest.json5`. The manifest expose
 - `planner_review_interval`
 - `trajectory_summary_window`
 - `a11y_tree_max_tokens`
+- `model_timeout_seconds`
+- `model_max_retries`
+- `model_retry_backoff_seconds`
+- `max_agent_contexts`
+- `agent_context_ttl_seconds`
 - `qwen_api_backend`
 - `qwen_enable_thinking`
 - `qwen_thinking_budget`
