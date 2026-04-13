@@ -63,6 +63,7 @@ TRAJECTORY_SUMMARY_WINDOW = int(os.environ.get("TRAJECTORY_SUMMARY_WINDOW", "8")
 MODEL_TIMEOUT_SECONDS = float(os.environ.get("MODEL_TIMEOUT_SECONDS", "120"))
 MODEL_MAX_RETRIES = int(os.environ.get("MODEL_MAX_RETRIES", "1"))
 MODEL_RETRY_BACKOFF_SECONDS = float(os.environ.get("MODEL_RETRY_BACKOFF_SECONDS", "1.5"))
+MAX_STEPS = int(os.environ.get("MAX_STEPS", "30"))
 
 
 @dataclass
@@ -154,6 +155,29 @@ class Agent:
                     context_id=message.context_id,
                     task_id=getattr(message, "task_id", None),
                 )
+            )
+            return
+
+        if MAX_STEPS > 0 and self.state.total_steps >= MAX_STEPS:
+            await updater.add_artifact(
+                parts=[
+                    Part(
+                        root=TextPart(
+                            text=f"Reached maximum step limit ({MAX_STEPS}). Stopping."
+                        )
+                    ),
+                    Part(
+                        root=DataPart(
+                            data={
+                                "actions": ["FAIL"],
+                                "current_goal": self.state.current_goal,
+                                "trajectory_summary": self.state.last_trajectory_summary,
+                                "plan_reasoning": f"Exceeded max_steps limit of {MAX_STEPS}",
+                            }
+                        )
+                    ),
+                ],
+                name="prediction",
             )
             return
 
