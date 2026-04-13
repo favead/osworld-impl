@@ -3,35 +3,42 @@ import json
 import logging
 import os
 import re
-import sys
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from typing import Any
 
 from a2a.server.tasks import TaskUpdater
-from a2a.types import DataPart, FilePart, FileWithBytes, Message, Part, TaskState, TextPart
+from a2a.types import (
+    DataPart,
+    FilePart,
+    FileWithBytes,
+    Message,
+    Part,
+    TaskState,
+    TextPart,
+)
 from a2a.utils import new_agent_text_message
 
 from messenger import Messenger
-
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../osworld"))
-from mm_agents.qwen3vl_agent import Qwen3VLAgent
 
 
 logger = logging.getLogger("osworld_impl.agent")
 
 
-EXECUTOR_MODEL = os.environ.get("EXECUTOR_MODEL", os.environ.get("MODEL", "qwen/qwen3.5-plus-02-15"))
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
+EXECUTOR_MODEL = os.environ.get(
+    "EXECUTOR_MODEL", os.environ.get("MODEL", "qwen/qwen3.5-plus-02-15")
+)
 PLANNER_MODEL = os.environ.get("PLANNER_MODEL", "google/gemini-3.1-flash-lite-preview")
 MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "1500"))
 TOP_P = float(os.environ.get("TOP_P", "0.9"))
-TEMPERATURE = float(os.environ.get("TEMPERATURE", "0.5"))
+TEMPERATURE = float(os.environ.get("TEMPERATURE", "0.1"))
 MAX_TRAJECTORY_LENGTH = int(os.environ.get("MAX_TRAJECTORY_LENGTH", "12"))
 A11Y_TREE_MAX_TOKENS = int(os.environ.get("A11Y_TREE_MAX_TOKENS", "10000"))
 PLANNER_REVIEW_INTERVAL = int(os.environ.get("PLANNER_REVIEW_INTERVAL", "12"))
 TRAJECTORY_SUMMARY_WINDOW = int(os.environ.get("TRAJECTORY_SUMMARY_WINDOW", "8"))
-QWEN_API_BACKEND = os.environ.get("QWEN_API_BACKEND", "openai")
-QWEN_ENABLE_THINKING = os.environ.get("QWEN_ENABLE_THINKING", "0").lower() in {"1", "true", "yes", "on"}
-QWEN_THINKING_BUDGET = int(os.environ.get("QWEN_THINKING_BUDGET", "32768"))
 
 
 @dataclass
@@ -74,8 +81,6 @@ class AgentState:
     last_trajectory_summary: str = ""
     last_observation: dict[str, Any] = field(default_factory=dict)
     trajectory: list[StepRecord] = field(default_factory=list)
-    executor: Qwen3VLAgent | None = None
-    planner_backend: Qwen3VLAgent | None = None
 
 
 def _truncate_text(text: str, limit: int) -> str:
@@ -137,8 +142,19 @@ class Agent:
         if "screenshot" not in current_obs:
             await updater.add_artifact(
                 parts=[
-                    Part(root=TextPart(text="Observation is missing a screenshot; returning WAIT so the planner can retry on the next frame.")),
-                    Part(root=DataPart(data={"actions": ["WAIT"], "current_goal": self.state.current_goal})),
+                    Part(
+                        root=TextPart(
+                            text="Observation is missing a screenshot; returning WAIT so the planner can retry on the next frame."
+                        )
+                    ),
+                    Part(
+                        root=DataPart(
+                            data={
+                                "actions": ["WAIT"],
+                                "current_goal": self.state.current_goal,
+                            }
+                        )
+                    ),
                 ],
                 name="prediction",
             )
@@ -149,7 +165,11 @@ class Agent:
         if decision.task_completed:
             await updater.add_artifact(
                 parts=[
-                    Part(root=TextPart(text=decision.reasoning or "Task appears complete.")),
+                    Part(
+                        root=TextPart(
+                            text=decision.reasoning or "Task appears complete."
+                        )
+                    ),
                     Part(
                         root=DataPart(
                             data={
@@ -168,7 +188,12 @@ class Agent:
         if decision.failure:
             await updater.add_artifact(
                 parts=[
-                    Part(root=TextPart(text=decision.reasoning or "Planner marked the task as blocked.")),
+                    Part(
+                        root=TextPart(
+                            text=decision.reasoning
+                            or "Planner marked the task as blocked."
+                        )
+                    ),
                     Part(
                         root=DataPart(
                             data={
@@ -185,9 +210,12 @@ class Agent:
             return
 
         executor_instruction = self._build_executor_instruction(decision)
-        executor = self.state.executor
-        assert executor is not None
-        response, actions = executor.predict(executor_instruction, current_obs)
+        executor_result = self._execute_action(executor_instruction, current_obs)
+        response = executor_result.get("response", "")
+        actions = executor_result.get("actions", [])
+        if not isinstance(actions, list):
+            actions = []
+        actions = [str(action).strip() for action in actions if str(action).strip()]
         if not actions:
             actions = ["WAIT"]
 
@@ -196,7 +224,7 @@ class Agent:
             step_index=self.state.total_steps + 1,
             goal=self.state.current_goal,
             executor_prompt=executor_instruction,
-            executor_response=response or "",
+            executor_response=response,
             action_summary=action_summary,
             actions=actions,
             observation_summary=self._summarize_observation(current_obs),
@@ -208,7 +236,11 @@ class Agent:
 
         await updater.add_artifact(
             parts=[
-                Part(root=TextPart(text=response or f"Current goal: {self.state.current_goal}")),
+                Part(
+                    root=TextPart(
+                        text=response or f"Current goal: {self.state.current_goal}"
+                    )
+                ),
                 Part(
                     root=DataPart(
                         data={
@@ -255,43 +287,27 @@ class Agent:
             except Exception:
                 obs.pop("screenshot", None)
 
-        return ParsedInput(instruction=instruction, observation=obs, env_config=env_config)
+        return ParsedInput(
+            instruction=instruction, observation=obs, env_config=env_config
+        )
 
     def _merge_input(self, parsed: ParsedInput) -> None:
-        instruction_changed = bool(parsed.instruction and parsed.instruction != self.state.instruction)
-        env_changed = bool(parsed.env_config and parsed.env_config != self.state.env_config)
-
+        instruction_changed = bool(
+            parsed.instruction and parsed.instruction != self.state.instruction
+        )
         if instruction_changed:
-            self.state = AgentState(instruction=parsed.instruction, env_config=parsed.env_config or self.state.env_config)
+            self.state = AgentState(
+                instruction=parsed.instruction,
+                env_config=parsed.env_config or self.state.env_config,
+            )
         else:
             if parsed.instruction:
                 self.state.instruction = parsed.instruction
             if parsed.env_config:
                 self.state.env_config = parsed.env_config
 
-        if self.state.executor is None or instruction_changed or env_changed:
-            self.state.executor = self._new_qwen_backend(history_n=MAX_TRAJECTORY_LENGTH)
-        if self.state.planner_backend is None or instruction_changed or env_changed:
-            self.state.planner_backend = self._new_qwen_backend(history_n=1)
-
         if parsed.observation:
             self.state.last_observation = parsed.observation
-
-    def _new_qwen_backend(self, history_n: int) -> Qwen3VLAgent:
-        backend = Qwen3VLAgent(
-            model=EXECUTOR_MODEL,
-            max_tokens=MAX_TOKENS,
-            top_p=TOP_P,
-            temperature=TEMPERATURE,
-            action_space="pyautogui",
-            observation_type="screenshot",
-            history_n=history_n,
-            api_backend=QWEN_API_BACKEND,
-            enable_thinking=QWEN_ENABLE_THINKING,
-            thinking_budget=QWEN_THINKING_BUDGET,
-        )
-        backend.reset(logger)
-        return backend
 
     def _maybe_refresh_plan(self, current_obs: dict[str, Any]) -> PlanDecision:
         force_review = (
@@ -310,13 +326,14 @@ class Agent:
 
         summary = self._summarize_trajectory()
         decision = self._review_and_plan(summary, current_obs)
-
         if not decision.goal and self.state.current_goal:
             decision.goal = self.state.current_goal
             decision.continue_current_goal = True
 
         self.state.last_trajectory_summary = summary
-        self.state.current_goal = decision.goal or self.state.current_goal or self.state.instruction
+        self.state.current_goal = (
+            decision.goal or self.state.current_goal or self.state.instruction
+        )
         self.state.plan_reasoning = decision.reasoning
         self.state.executor_guidance = decision.executor_guidance
         self.state.steps_since_plan = 0
@@ -327,18 +344,17 @@ class Agent:
             return "No prior trajectory yet. This is the first execution step for the current task."
 
         recent_steps = self.state.trajectory[-TRAJECTORY_SUMMARY_WINDOW:]
-        trajectory_payload = []
-        for step in recent_steps:
-            trajectory_payload.append(
-                {
-                    "step": step.step_index,
-                    "goal": step.goal,
-                    "action_summary": step.action_summary,
-                    "actions": step.actions,
-                    "executor_response": _truncate_text(step.executor_response, 600),
-                    "observation_summary": step.observation_summary,
-                }
-            )
+        trajectory_payload = [
+            {
+                "step": step.step_index,
+                "goal": step.goal,
+                "action_summary": step.action_summary,
+                "actions": step.actions,
+                "executor_response": _truncate_text(step.executor_response, 600),
+                "observation_summary": step.observation_summary,
+            }
+            for step in recent_steps
+        ]
 
         prompt = [
             {
@@ -374,20 +390,16 @@ class Agent:
         ]
 
         try:
-            raw = self._call_llm(prompt)
+            raw = self._call_model(PLANNER_MODEL, prompt)
             data = _extract_json_object(raw)
             if not data:
                 raise ValueError("summary response was not valid JSON")
-            summary = data.get("summary", "")
-            status = data.get("status", "on_track")
-            issues = data.get("issues", [])
-            evidence = data.get("evidence", [])
             return json.dumps(
                 {
-                    "summary": summary,
-                    "status": status,
-                    "issues": issues,
-                    "evidence": evidence,
+                    "summary": data.get("summary", ""),
+                    "status": data.get("status", "on_track"),
+                    "issues": data.get("issues", []),
+                    "evidence": data.get("evidence", []),
                 },
                 ensure_ascii=False,
             )
@@ -400,9 +412,11 @@ class Agent:
                 lines.append(f"Step {step.step_index}: {step.action_summary}")
             return "\n".join(lines)
 
-    def _review_and_plan(self, trajectory_summary: str, current_obs: dict[str, Any]) -> PlanDecision:
+    def _review_and_plan(
+        self, trajectory_summary: str, current_obs: dict[str, Any]
+    ) -> PlanDecision:
         observation_text = self._planner_observation_text(current_obs)
-        message_content: list[dict[str, Any]] = [
+        content = [
             {
                 "type": "text",
                 "text": (
@@ -415,13 +429,12 @@ class Agent:
                     "Structured observation:\n"
                     f"{observation_text}\n\n"
                     "Decide whether to keep or replace the current subgoal. "
-                    "Return strict JSON with keys goal, reasoning, continue_current_goal, task_completed, failure, executor_guidance. "
-                    "executor_guidance should be a short instruction for the low-level executor."
+                    "Return strict JSON with keys goal, reasoning, continue_current_goal, task_completed, failure, executor_guidance."
                 ),
             }
         ]
         if "screenshot" in current_obs:
-            message_content.append(self._image_message(current_obs["screenshot"]))
+            content.append(self._image_message(current_obs["screenshot"]))
 
         prompt = [
             {
@@ -438,11 +451,11 @@ class Agent:
                     }
                 ],
             },
-            {"role": "user", "content": message_content},
+            {"role": "user", "content": content},
         ]
 
         try:
-            raw = self._call_llm(prompt)
+            raw = self._call_model(PLANNER_MODEL, prompt)
             data = _extract_json_object(raw)
             if not data:
                 raise ValueError("planner response was not valid JSON")
@@ -464,33 +477,98 @@ class Agent:
                 executor_guidance="Advance toward the visible next UI step and avoid repeating the same failed action.",
             )
 
-    def _build_executor_instruction(self, decision: PlanDecision) -> str:
-        sections = [
-            f"Overall task: {self.state.instruction}",
-            f"Current subgoal: {self.state.current_goal}",
-        ]
-        if decision.executor_guidance:
-            sections.append(f"Planner guidance: {decision.executor_guidance}")
-        if self.state.last_trajectory_summary:
-            sections.append(f"Recent trajectory summary: {self.state.last_trajectory_summary}")
-        sections.append(
-            "Choose exactly one next desktop action that best advances the current subgoal. "
-            "If the subgoal is already satisfied, terminate successfully. If the UI needs time to update, wait."
-        )
-        return "\n\n".join(sections)
-
-    def _call_llm(self, messages: list[dict[str, Any]]) -> str:
-        assert self.state.planner_backend is not None
-        return self.state.planner_backend.call_llm(
+    def _execute_action(
+        self, executor_instruction: str, current_obs: dict[str, Any]
+    ) -> dict[str, Any]:
+        content = [
+            {"type": "text", "text": executor_instruction},
             {
-                "model": PLANNER_MODEL,
-                "messages": messages,
-                "max_tokens": MAX_TOKENS,
-                "top_p": TOP_P,
-                "temperature": TEMPERATURE,
+                "type": "text",
+                "text": (
+                    "Return strict JSON with keys response and actions. "
+                    "actions must be an array of 1 to 3 pyautogui-style action strings. "
+                    "Use WAIT if you need the UI to update, DONE if the task is complete, and FAIL if blocked."
+                ),
             },
-            PLANNER_MODEL,
+        ]
+        if "screenshot" in current_obs:
+            content.append(self._image_message(current_obs["screenshot"]))
+        observation_text = self._planner_observation_text(current_obs)
+        if observation_text:
+            content.append(
+                {"type": "text", "text": f"Structured observation:\n{observation_text}"}
+            )
+
+        prompt = [
+            {
+                "role": "system",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "You are a desktop action executor. Pick the next best action for the current subgoal. "
+                            "Keep actions concise and executable."
+                        ),
+                    }
+                ],
+            },
+            {"role": "user", "content": content},
+        ]
+
+        try:
+            raw = self._call_model(EXECUTOR_MODEL, prompt)
+            data = _extract_json_object(raw)
+            if isinstance(data, dict):
+                return data
+        except Exception as exc:
+            logger.warning("Executor call failed, falling back to WAIT: %s", exc)
+        return {
+            "response": "Executor fallback: waiting for the next observation.",
+            "actions": ["WAIT"],
+        }
+
+    def _call_model(self, model: str, messages: list[dict[str, Any]]) -> str:
+        if not OPENAI_API_KEY:
+            raise RuntimeError("OPENAI_API_KEY is required")
+
+        base_url = OPENAI_BASE_URL.rstrip("/")
+        request_url = f"{base_url}/chat/completions"
+        payload = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": MAX_TOKENS,
+            "top_p": TOP_P,
+            "temperature": TEMPERATURE,
+        }
+        request = urllib.request.Request(
+            request_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
         )
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response:
+                body = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            error_body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"LLM request failed with HTTP {exc.code}: {error_body}"
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"LLM request failed: {exc}") from exc
+
+        choices = body.get("choices", [])
+        if not choices:
+            raise RuntimeError(f"LLM response missing choices: {body}")
+        content = choices[0].get("message", {}).get("content", "")
+        if isinstance(content, list):
+            return "\n".join(
+                str(part.get("text", "")) for part in content if isinstance(part, dict)
+            )
+        return str(content)
 
     def _planner_observation_text(self, obs: dict[str, Any]) -> str:
         structured: dict[str, Any] = {}
@@ -503,11 +581,13 @@ class Agent:
                 structured[key] = value
             else:
                 try:
-                    structured[key] = json.loads(json.dumps(value, ensure_ascii=False, default=str))
+                    structured[key] = json.loads(
+                        json.dumps(value, ensure_ascii=False, default=str)
+                    )
                 except Exception:
                     structured[key] = str(value)
         if not structured:
-            return "No structured observation fields besides the screenshot."
+            return ""
         return json.dumps(structured, ensure_ascii=False, indent=2)
 
     def _image_message(self, screenshot_bytes: bytes) -> dict[str, Any]:
@@ -516,6 +596,23 @@ class Agent:
             "type": "image_url",
             "image_url": {"url": f"data:image/png;base64,{encoded}"},
         }
+
+    def _build_executor_instruction(self, decision: PlanDecision) -> str:
+        sections = [
+            f"Overall task: {self.state.instruction}",
+            f"Current subgoal: {self.state.current_goal}",
+        ]
+        if decision.executor_guidance:
+            sections.append(f"Planner guidance: {decision.executor_guidance}")
+        if self.state.last_trajectory_summary:
+            sections.append(
+                f"Recent trajectory summary: {self.state.last_trajectory_summary}"
+            )
+        sections.append(
+            "Choose the single next desktop action that best advances the current subgoal. "
+            "Do not repeat the same failed action. If the screen is still updating, use WAIT."
+        )
+        return "\n\n".join(sections)
 
     def _summarize_observation(self, obs: dict[str, Any]) -> str:
         summary: dict[str, Any] = {}
@@ -527,12 +624,16 @@ class Agent:
         for key in ["a11y_tree", "accessibility_tree"]:
             if key in obs and isinstance(obs[key], str):
                 summary[key] = f"{len(obs[key])} chars"
-        return json.dumps(summary, ensure_ascii=False) if summary else "Minimal screenshot-only observation."
+        return (
+            json.dumps(summary, ensure_ascii=False)
+            if summary
+            else "Minimal screenshot-only observation."
+        )
 
     def _summarize_actions(self, actions: list[str]) -> str:
-        cleaned = []
-        for action in actions:
-            cleaned.append(action if len(action) <= 200 else action[:200] + "...")
+        cleaned = [
+            action if len(action) <= 200 else action[:200] + "..." for action in actions
+        ]
         return "; ".join(cleaned)
 
     def _looks_stuck(self) -> bool:
@@ -542,5 +643,7 @@ class Agent:
         recent_summaries = [step.action_summary for step in recent]
         if len(set(recent_summaries)) == 1:
             return True
-        waits = sum(1 for step in recent if any(action == "WAIT" for action in step.actions))
+        waits = sum(
+            1 for step in recent if any(action == "WAIT" for action in step.actions)
+        )
         return waits >= 2
