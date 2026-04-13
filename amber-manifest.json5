@@ -27,7 +27,7 @@
 
   // Runtime configuration
   program: {
-    image: "ghcr.io/favead/osworld-impl:1.3.0",
+    image: "ghcr.io/favead/osworld-impl:1.4.0",
     entrypoint: "uv run python src/server.py --host 0.0.0.0 --port 9009",
 
     // TODO: Pass config values as environment variables
@@ -63,5 +63,9 @@
 
   // Capabilities exposed to the scenario
   exports: { a2a: "a2a" },
+
+  metadata: {
+    participant_roles: ["agent"],
+  },
 
 }
