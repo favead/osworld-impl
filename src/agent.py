@@ -35,6 +35,12 @@ MODEL_RETRY_BACKOFF_SECONDS = float(os.environ.get("MODEL_RETRY_BACKOFF_SECONDS"
 MAX_STEPS = int(os.environ.get("MAX_STEPS", "30"))
 HISTORY_WINDOW = int(os.environ.get("HISTORY_WINDOW", "8"))
 A11Y_TREE_MAX_CHARS = int(os.environ.get("A11Y_TREE_MAX_TOKENS", "10000"))
+TERMINAL_RECOVERY_ENABLED = os.environ.get("TERMINAL_RECOVERY_ENABLED", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 
 class Agent:
@@ -182,8 +188,9 @@ class Agent:
             }
         except Exception as exc:
             logger.warning("ReAct call failed, falling back to WAIT: %s", exc)
+            err = f"{type(exc).__name__}: {exc}".strip()
             return {
-                "response": "ReAct fallback: waiting for next observation.",
+                "response": f"ReAct fallback after model error: {err}",
                 "actions": ["WAIT"],
             }
 
@@ -211,6 +218,9 @@ class Agent:
         )
 
     def _apply_stuck_recovery(self, actions: list[str]) -> tuple[list[str], str]:
+        if not TERMINAL_RECOVERY_ENABLED:
+            return actions, ""
+
         if not self._looks_stuck():
             self._stuck_recovery_count = 0
             return actions, ""

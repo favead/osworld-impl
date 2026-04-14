@@ -13,21 +13,123 @@ def strip_code_fence(text: str) -> str:
     return text.strip()
 
 
+def _extract_balanced_json(raw: str) -> dict[str, Any] | None:
+    start = raw.find("{")
+    if start < 0:
+        return None
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for idx in range(start, len(raw)):
+        ch = raw[idx]
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\":
+            escaped = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                snippet = raw[start : idx + 1]
+                try:
+                    value = json.loads(snippet)
+                except json.JSONDecodeError:
+                    return None
+                if isinstance(value, dict):
+                    return value
+                return None
+    return None
+
+
+def _content_to_text(content: Any) -> str:
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, dict):
+                if isinstance(part.get("text"), str):
+                    parts.append(part["text"])
+                elif part.get("type") == "output_text" and isinstance(part.get("output_text"), str):
+                    parts.append(part["output_text"])
+        return "\n".join(parts).strip()
+    if isinstance(content, str):
+        return content
+    return str(content)
+
+
+def _tool_calls_to_actions(tool_calls: Any) -> list[dict[str, Any]]:
+    if not isinstance(tool_calls, list):
+        return []
+
+    actions: list[dict[str, Any]] = []
+    for call in tool_calls:
+        if not isinstance(call, dict):
+            continue
+        function = call.get("function")
+        if not isinstance(function, dict):
+            continue
+
+        name = function.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+
+        args_raw = function.get("arguments", "{}")
+        parsed_args: dict[str, Any] = {}
+        if isinstance(args_raw, str) and args_raw.strip():
+            try:
+                decoded = json.loads(args_raw)
+                if isinstance(decoded, dict):
+                    parsed_args = decoded
+            except json.JSONDecodeError:
+                parsed_args = {}
+        elif isinstance(args_raw, dict):
+            parsed_args = args_raw
+
+        actions.append({"name": name.strip(), "arguments": parsed_args})
+    return actions
+
+
 def extract_json_object(text: str) -> dict[str, Any] | None:
     candidate = strip_code_fence(text)
-    if candidate.startswith("<think>") and "</think>" in candidate:
+    if "</think>" in candidate:
         candidate = candidate.split("</think>", 1)[1].strip()
 
-    for raw in (candidate, text):
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start == -1 or end == -1 or end <= start:
-            continue
-        snippet = raw[start : end + 1]
+    tool_call_match = re.search(r"<tool_call>\s*(\{.*\})\s*</tool_call>", candidate, flags=re.DOTALL)
+    if tool_call_match:
         try:
-            return json.loads(snippet)
+            call_obj = json.loads(tool_call_match.group(1))
+            if isinstance(call_obj, dict):
+                reasoning = candidate[: tool_call_match.start()].strip()
+                return {
+                    "reasoning": reasoning,
+                    "actions": [call_obj],
+                }
         except json.JSONDecodeError:
+            pass
+
+    for raw in (candidate, text):
+        trimmed = raw.strip()
+        if not trimmed:
             continue
+
+        try:
+            parsed = json.loads(trimmed)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+        parsed = _extract_balanced_json(trimmed)
+        if isinstance(parsed, dict):
+            return parsed
 
     return None
 
@@ -94,7 +196,12 @@ def call_model(
     if not choices:
         raise RuntimeError(f"LLM response missing choices: {body}")
 
-    content = choices[0].get("message", {}).get("content", "")
-    if isinstance(content, list):
-        return "\n".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
-    return str(content)
+    message = choices[0].get("message", {})
+    if not isinstance(message, dict):
+        return str(message)
+
+    reasoning = _content_to_text(message.get("content", "")).strip()
+    actions = _tool_calls_to_actions(message.get("tool_calls"))
+    if actions:
+        return json.dumps({"reasoning": reasoning, "actions": actions}, ensure_ascii=False)
+    return reasoning
