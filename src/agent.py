@@ -56,7 +56,7 @@ PLANNER_MODEL = os.environ.get("PLANNER_MODEL", "google/gemini-3.1-flash-lite-pr
 MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "1500"))
 TOP_P = float(os.environ.get("TOP_P", "0.9"))
 TEMPERATURE = float(os.environ.get("TEMPERATURE", "0.1"))
-MAX_TRAJECTORY_LENGTH = int(os.environ.get("MAX_TRAJECTORY_LENGTH", "12"))
+MAX_TRAJECTORY_LENGTH = int(os.environ.get("MAX_TRAJECTORY_LENGTH", "30"))
 A11Y_TREE_MAX_TOKENS = int(os.environ.get("A11Y_TREE_MAX_TOKENS", "10000"))
 PLANNER_REVIEW_INTERVAL = int(os.environ.get("PLANNER_REVIEW_INTERVAL", "12"))
 TRAJECTORY_SUMMARY_WINDOW = int(os.environ.get("TRAJECTORY_SUMMARY_WINDOW", "8"))
@@ -139,6 +139,35 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
     return None
 
 
+def _coerce_screenshot_bytes(value: Any) -> bytes | None:
+    if isinstance(value, bytearray):
+        value = bytes(value)
+
+    if isinstance(value, bytes):
+        if value.startswith(b"\x89PNG") or value.startswith(b"\xff\xd8"):
+            return value
+        try:
+            decoded = base64.b64decode(value, validate=True)
+            if decoded:
+                return decoded
+        except Exception:
+            pass
+        return value
+
+    if isinstance(value, str):
+        encoded = value.strip()
+        if not encoded:
+            return None
+        if encoded.startswith("data:image") and "," in encoded:
+            encoded = encoded.split(",", 1)[1]
+        try:
+            return base64.b64decode(encoded)
+        except Exception:
+            return None
+
+    return None
+
+
 class Agent:
     def __init__(self):
         self.messenger = Messenger()
@@ -177,7 +206,7 @@ class Agent:
                         )
                     ),
                 ],
-                name="prediction",
+                name="action",
             )
             return
 
@@ -204,7 +233,7 @@ class Agent:
                         )
                     ),
                 ],
-                name="prediction",
+                name="action",
             )
             return
 
@@ -229,7 +258,7 @@ class Agent:
                         )
                     ),
                 ],
-                name="prediction",
+                name="action",
             )
             return
 
@@ -253,7 +282,7 @@ class Agent:
                         )
                     ),
                 ],
-                name="prediction",
+                name="action",
             )
             return
 
@@ -280,7 +309,8 @@ class Agent:
             observation_summary=self._summarize_observation(current_obs),
         )
         self.state.trajectory.append(record)
-        self.state.trajectory = self.state.trajectory[-MAX_TRAJECTORY_LENGTH:]
+        if MAX_TRAJECTORY_LENGTH > 0:
+            self.state.trajectory = self.state.trajectory[-MAX_TRAJECTORY_LENGTH:]
         self.state.total_steps += 1
         self.state.steps_since_plan += 1
 
@@ -305,7 +335,7 @@ class Agent:
                     )
                 ),
             ],
-            name="prediction",
+            name="action",
         )
 
     def _parse_message(self, message: Message) -> ParsedInput:
@@ -318,7 +348,9 @@ class Agent:
             if isinstance(root, TextPart) and root.text.strip():
                 instruction = root.text.strip()
             elif isinstance(root, FilePart) and isinstance(root.file, FileWithBytes):
-                obs["screenshot"] = base64.b64decode(root.file.bytes)
+                screenshot_bytes = _coerce_screenshot_bytes(root.file.bytes)
+                if screenshot_bytes is not None:
+                    obs["screenshot"] = screenshot_bytes
             elif isinstance(root, DataPart):
                 payload = dict(root.data)
                 if "env_config" in payload:
@@ -328,14 +360,12 @@ class Agent:
                 obs.update(payload)
 
         screenshot_value = obs.get("screenshot")
-        if isinstance(screenshot_value, str):
-            encoded = screenshot_value
-            if encoded.startswith("data:image"):
-                encoded = encoded.split(",", 1)[1]
-            try:
-                obs["screenshot"] = base64.b64decode(encoded)
-            except Exception:
+        if screenshot_value is not None:
+            screenshot_bytes = _coerce_screenshot_bytes(screenshot_value)
+            if screenshot_bytes is None:
                 obs.pop("screenshot", None)
+            else:
+                obs["screenshot"] = screenshot_bytes
 
         return ParsedInput(
             instruction=instruction, observation=obs, env_config=env_config
@@ -393,7 +423,7 @@ class Agent:
         if not self.state.trajectory:
             return "No prior trajectory yet. This is the first execution step for the current task."
 
-        recent_steps = self.state.trajectory[-TRAJECTORY_SUMMARY_WINDOW:]
+        steps_for_summary = self.state.trajectory
         trajectory_payload = [
             {
                 "step": step.step_index,
@@ -403,7 +433,7 @@ class Agent:
                 "executor_response": _truncate_text(step.executor_response, 600),
                 "observation_summary": step.observation_summary,
             }
-            for step in recent_steps
+            for step in steps_for_summary
         ]
 
         prompt = [
@@ -458,7 +488,7 @@ class Agent:
             lines = [f"Task: {self.state.instruction}"]
             if self.state.current_goal:
                 lines.append(f"Current goal: {self.state.current_goal}")
-            for step in recent_steps:
+            for step in steps_for_summary[-TRAJECTORY_SUMMARY_WINDOW:]:
                 lines.append(f"Step {step.step_index}: {step.action_summary}")
             return "\n".join(lines)
 
@@ -476,6 +506,8 @@ class Agent:
                     f"{self.state.current_goal or 'None yet'}\n\n"
                     "Trajectory summary:\n"
                     f"{trajectory_summary}\n\n"
+                    "Full executor trajectory (every recorded step):\n"
+                    f"{self._planner_trajectory_text()}\n\n"
                     "Structured observation:\n"
                     f"{observation_text}\n\n"
                     "Decide whether to keep or replace the current subgoal. "
@@ -678,6 +710,9 @@ class Agent:
             f"Overall task: {self.state.instruction}",
             f"Current subgoal: {self.state.current_goal}",
         ]
+        executor_history = self._executor_trajectory_text()
+        if executor_history:
+            sections.append(f"Recent executed actions:\n{executor_history}")
         if decision.executor_guidance:
             sections.append(f"Planner guidance: {decision.executor_guidance}")
         if self.state.last_trajectory_summary:
@@ -689,6 +724,32 @@ class Agent:
             "Do not repeat the same failed action. If the screen is still updating, use WAIT."
         )
         return "\n\n".join(sections)
+
+    def _planner_trajectory_text(self) -> str:
+        if not self.state.trajectory:
+            return "[]"
+        payload = [
+            {
+                "step": step.step_index,
+                "goal": step.goal,
+                "actions": step.actions,
+                "action_summary": step.action_summary,
+                "observation_summary": step.observation_summary,
+                "executor_response": _truncate_text(step.executor_response, 500),
+            }
+            for step in self.state.trajectory
+        ]
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+
+    def _executor_trajectory_text(self) -> str:
+        if not self.state.trajectory:
+            return ""
+        lines = []
+        for step in self.state.trajectory:
+            lines.append(
+                f"Step {step.step_index} | goal={step.goal or '-'} | actions={step.action_summary}"
+            )
+        return "\n".join(lines)
 
     def _summarize_observation(self, obs: dict[str, Any]) -> str:
         summary: dict[str, Any] = {}

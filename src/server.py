@@ -43,7 +43,7 @@ def main():
         description="An OSWorld A2A agent that plans and executes desktop actions from text, screenshots, and structured observations.",
         url=args.card_url or f"http://{args.host}:{args.port}/",
         version='1.0.0',
-        default_input_modes=['text', 'file', 'data'],
+        default_input_modes=['text', 'image', 'data'],
         default_output_modes=['text', 'data'],
         capabilities=AgentCapabilities(streaming=True),
         skills=[skill]
