@@ -142,7 +142,11 @@ def call_model(
     base_url: str,
     max_tokens: int,
     top_p: float,
+    top_k: int,
+    min_p: float,
     temperature: float,
+    presence_penalty: float,
+    repetition_penalty: float,
     timeout_seconds: float,
     max_retries: int,
     retry_backoff_seconds: float,
@@ -156,7 +160,11 @@ def call_model(
         "messages": messages,
         "max_tokens": max_tokens,
         "top_p": top_p,
+        "top_k": top_k,
+        "min_p": min_p,
         "temperature": temperature,
+        "presence_penalty": presence_penalty,
+        "repetition_penalty": repetition_penalty,
     }
     request = urllib.request.Request(
         request_url,
